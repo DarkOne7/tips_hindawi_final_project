@@ -1,0 +1,19 @@
+**Description:** The `pass_token` is an HS256 JWT, but the endpoint accepts a token
+with `"alg":"none"` and does not enforce the signature. It also selects the
+prescription using the client-controlled `rx_id` without checking ownership. Any
+authenticated user can therefore forge a token and view another patient's dispense
+pass for an existing `rx_id`.
+
+**Evidence:**
+
+- Original pass for `rx_id=4` belongs to `admin321@nilecare.com` and shows
+  `Modafinil`, `200mg`, `Once daily in the morning`.
+- A forged `alg=none` token with `rx_id=4` was accepted from patient A's session and
+  returned the same pass (`dispense_none.html`, `dispense321.html`).
+- No session returned a redirect/login page only; unauthenticated access redirected to
+  login. `rx_id` values other than `4` returned
+---
+**Impact:** Disclosure of prescription and patient data across accounts may enable
+medication fraud if a pharmacy workflow trusts the pass without independent
+authorization. The JWT signing secret was not required because signature verification
+was absent.
