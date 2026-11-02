@@ -1,0 +1,34 @@
+1. Summary and Technical Explanation
+
+The checkout flow on /lab-tests trusts a client-controllable discount_pct parameter to determine the final price applied to an order, instead of deriving the discount server-side from the coupon code alone. When a valid coupon (e.g., NILECARE10, intended to grant a 10% discount) is applied, the request sent to the server includes the discount percentage as an editable parameter. By intercepting this request and modifying discount_pct from 10 to 100, the order total is recalculated using a 100% discount, allowing the product to be purchased for EGP 0.
+
+This is a classic case of trusting client-supplied data for a security/financially-sensitive calculation. The server should look up the coupon code in its own database, retrieve the authoritative discount value associated with it, and compute the price entirely server-side — never accepting the discount percentage itself as input from the client. Because the discount value is transmitted as a regular, unsigned, unvalidated parameter, any user with basic proxy tooling (Burp Suite, in this case) can tamper with it to obtain any discount they choose, including a full 100% discount.
+
+2. Steps to Reproduce
+Configure Burp Suite as an intercepting proxy and route browser traffic through it.
+Navigate to https://geo-salmon-complement-walk.trycloudflare.com/lab-tests.
+Select any product/test and add it to the cart.
+Enter the coupon code NILECARE10 (intended 10% discount) and proceed to checkout.
+In Burp Suite, enable “Intercept” and submit the checkout/apply-coupon request.
+Locate the discount_pct parameter in the intercepted request, with value 10.
+Modify the parameter value from discount_pct=10 to discount_pct=100.
+Forward the modified request.
+Observe the order summary: the final price is now EGP 0, with a 100% discount applied instead of the intended 10%.
+Complete the purchase to confirm the manipulated price is accepted and the order is created.
+
+Expected result: The server ignores or rejects a client-supplied discount_pct, and instead applies only the discount percentage associated with the coupon code as stored on the server.
+
+Actual result: The server trusts the client-supplied discount_pct value, allowing the price to be reduced to zero (or any attacker-chosen discount) regardless of the coupon’s actual configured value.
+
+3. Impact
+Direct financial loss: Any authenticated user can obtain any product or lab test for free (or at an attacker-chosen price) by tampering with a single request parameter.
+Trivial to automate/abuse at scale: Since no special privilege is needed beyond a valid session and any real or guessable coupon code, this can be scripted to generate large numbers of zero-cost or heavily discounted orders.
+Undermines business/financial controls: Discount and promotional logic is meant to be governed strictly server-side; this flaw lets any user bypass pricing rules entirely, affecting revenue integrity and the validity of coupon-based promotions.
+Potential abuse of legitimate coupons: Even a legitimately obtained, limited-value coupon (10%) can be escalated to a full discount, defeating the purpose of controlled promotional campaigns.
+4. Remediation
+Never trust client-supplied pricing/discount parameters. Remove discount_pct (or any discount value) from client-to-server requests entirely.
+Compute discounts server-side: On coupon application, look up the coupon code in the backend, retrieve its authoritative discount percentage/amount, and store/apply it server-side only — the client should never transmit or be able to influence this value.
+Recalculate and validate the final price server-side at every step of checkout (cart update, payment initiation, order confirmation), rejecting any mismatch between the expected and submitted totals.
+Enforce coupon business rules server-side: validity window, usage limits, minimum order value, per-user redemption limits, and maximum discount caps.
+Add integrity checks: if any order-related parameters must be round-tripped through the client, sign them (e.g., HMAC) server-side and verify the signature on submission so tampering is detected and rejected.
+Log and alert on anomalous discounts: flag orders where the applied discount doesn’t match the coupon’s configured server-side value, for retroactive detection and fraud review.
