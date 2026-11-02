@@ -1,0 +1,35 @@
+1. Summary and Technical Explanation
+
+The “Review and Rate” feature on the doctors’ profile page allows a user to submit one review/rating per doctor, but the submission endpoint does not enforce this limit atomically. When the review-submission request is replayed multiple times in rapid, concurrent succession, the server accepts and records each copy as a separate, valid review/rating — instead of recognizing that the same user has already rated that doctor and rejecting the duplicates.
+
+This is the same underlying class of flaw as the coupon race condition reported separately: the server performs a “check if this user has already reviewed this doctor” step followed by an “insert the review / update the aggregate rating” step, but these two steps are not wrapped in a single atomic operation. When several identical requests arrive close enough together, each one can pass the “has not yet reviewed” check before any of them finishes writing its review, so all of them get inserted. Since the doctor’s displayed rating is typically an aggregate (e.g., average or sum) of all submitted reviews, this directly inflates (or could be used to deflate) a doctor’s public rating using only one real user account and one genuine action, replayed in parallel.
+
+2. Steps to Reproduce
+Configure Burp Suite as an intercepting proxy and route browser traffic through it.
+Log in to the application with a test account.
+Navigate to https://geo-salmon-complement-walk.trycloudflare.com/doctors and open any doctor’s profile.
+Note the doctor’s current aggregate rating (e.g., “4.2 stars, 50 reviews”).
+Fill in the “Review and Rate” form: write any review text and select a 5-star rating.
+Intercept the submission request in Burp Suite before forwarding it.
+Send the intercepted request to Burp Repeater.
+Group the request and create multiple duplicate copies (e.g., 10 or more).
+Use Burp’s “Send group in parallel” feature to fire all copies simultaneously.
+Observe the responses: more than one request returns a success response for what should be a single, one-time review.
+Reload the doctor’s profile page and observe that the review count and/or aggregate rating have increased by more than the single review that was actually written — reflecting multiple accepted submissions from the same user.
+
+Expected result: Only the first request is accepted; all subsequent concurrent submissions from the same user for the same doctor are rejected (e.g., “you have already reviewed this doctor”), regardless of timing.
+
+Actual result: Multiple concurrent requests are each accepted as valid, independent reviews, letting a single user artificially inflate a doctor’s review count and rating using only request replay, no additional accounts needed.
+
+3. Impact
+Rating/review integrity compromised: A single user can artificially boost (or, with a 1-star submission, unfairly tank) a doctor’s public rating, misleading patients who rely on that rating to choose a provider — a particularly sensitive issue on a healthcare platform.
+Enables reputation manipulation at scale: Doctors, competitors, or malicious actors could exploit this to inflate their own standing or sabotage another provider’s reputation, with no need to create multiple accounts or pass any anti-spam/duplicate-review checks.
+Undermines trust in the review system: Once discovered, the ability to trivially inflate ratings makes the entire review/rating feature unreliable as a signal for patients.
+Compounds with similar race conditions found elsewhere on the platform (coupon discount race condition), pointing to a systemic lack of atomic “check-then-act” handling across the application’s business logic.
+4. Remediation
+Make review submission atomic: Enforce the one-review-per-user-per-doctor rule using a database-level unique constraint (e.g., a unique index on (user_id, doctor_id)) so that concurrent duplicate inserts fail at the database layer rather than relying on an application-level check.
+Use atomic upsert logic: If updates to an existing review are allowed, use an atomic INSERT ... ON CONFLICT DO UPDATE (or equivalent) pattern keyed on (user_id, doctor_id) instead of separate check-then-insert/update steps.
+Idempotency keys: Require a per-submission idempotency key so that accidental or malicious duplicate requests are recognized and only processed once.
+Server-side rate limiting: Throttle review-submission requests per user/session within a short time window.
+Recompute aggregate ratings from source data: Periodically (or on each read) recalculate a doctor’s rating directly from the underlying unique reviews table rather than trusting an incrementally updated counter that can drift due to race conditions.
+Audit all other “check-then-act” write paths (e.g., appointment booking slots, wallet/loyalty balances) for the same class of vulnerability, given the pattern already found in the coupon-discount flow.
