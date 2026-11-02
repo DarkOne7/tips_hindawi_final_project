@@ -1,0 +1,34 @@
+1. Summary and Technical Explanation
+
+The coupon-application endpoint on /lab-tests is vulnerable to a race condition that allows the same discount (e.g., 10% from NILECARE10) to be applied multiple times to a single order, instead of once. When the apply-coupon request is sent repeatedly in rapid succession — such that multiple requests arrive and are processed by the server concurrently — the server does not correctly serialize or lock the order’s state while validating and applying the discount. As a result, each concurrent request independently reads the pre-discount state, applies its own 10% reduction, and writes back, causing the discounts to stack rather than being capped at a single application.
+
+This happens because the “check coupon not yet used on this order, then apply discount” logic is not atomic. There is a time-of-check-to-time-of-use (TOCTOU) gap: between the moment the server checks whether the coupon has already been applied and the moment it commits the updated price, several identical requests can pass the check simultaneously before any of them finishes writing. Sending enough parallel copies of the request compounds the 10% reduction repeatedly until the order total reaches zero (or a negative/invalid value, depending on how the backend handles it), effectively bypassing the intended single-use, fixed-percentage nature of the coupon.
+
+2. Steps to Reproduce
+Configure Burp Suite as an intercepting proxy and route browser traffic through it.
+Navigate to https://geo-salmon-complement-walk.trycloudflare.com/lab-tests.
+Select any product/test and add it to the cart.
+Enter the coupon code NILECARE10 and intercept the apply-coupon request in Burp Suite.
+Send the intercepted request to Burp Repeater.
+In Repeater, group the request and create 10 (or more) duplicate copies of it.
+Use Burp’s “Send group in parallel” (single-packet attack / parallel send) feature to fire all copies simultaneously, minimizing the timing gap between them.
+Observe the responses: multiple requests return a successful “discount applied” response instead of only the first one succeeding and the rest being rejected.
+Reload the order/cart summary and observe that the discount has been applied multiple times — the total price is reduced far beyond the intended 10%, down to EGP 0 (or less, if negative totals are not blocked).
+Complete checkout to confirm the final, improperly discounted price is accepted by the backend.
+
+Expected result: Only the first request succeeds in applying the discount; all subsequent concurrent requests for the same coupon on the same order are rejected (e.g., “coupon already applied”) regardless of timing.
+
+Actual result: Multiple concurrent requests each successfully apply their own 10% discount, allowing the order total to be reduced to zero through pure request timing manipulation — with no need to tamper with any parameter value.
+
+3. Impact
+Direct financial loss: Any user can obtain products or lab tests for free by replaying a legitimate, otherwise-correct coupon request in parallel — no parameter tampering or special privilege required, only basic proxy tooling.
+Compounds with the parameter-tampering finding: Even if discount_pct tampering (reported separately) is fixed, this race condition independently allows the same zero-cost outcome through concurrency alone, so both issues must be remediated together.
+Easily automated and scaled: Parallel request generation is trivial to script (not limited to manual Burp use), making bulk abuse straightforward.
+Indicates a broader pattern of non-atomic state changes: Any other endpoint that performs a “check then act” sequence on shared financial state (wallet balances, order totals, redemption counts) is likely to share this weakness and should be audited.
+4. Remediation
+Make coupon application atomic: Wrap the “check if coupon already applied” and “apply discount” steps in a single database transaction using row-level locking (e.g., SELECT ... FOR UPDATE) or an atomic conditional update (e.g., UPDATE orders SET coupon_applied = true, total = total * 0.9 WHERE id = ? AND coupon_applied = false), so only one concurrent request can succeed.
+Enforce idempotency: Require an idempotency key per checkout/coupon-application attempt, and reject duplicate requests sharing the same key or the same order/coupon pair.
+Server-side rate limiting: Throttle repeated coupon-application requests from the same session/user within a short time window.
+Recalculate and validate final totals server-side at payment confirmation, independent of how many times a discount endpoint was called, using the authoritative stored discount state rather than trusting cumulative client-driven updates.
+Add monitoring/alerting for orders where the applied discount percentage exceeds the coupon’s configured maximum, to catch both this issue and the related parameter-tampering issue in production.
+Audit other “check-then-act” flows (wallet top-ups, loyalty points, inventory decrements) for the same class of race condition.
